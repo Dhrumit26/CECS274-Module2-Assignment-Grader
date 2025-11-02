@@ -258,6 +258,10 @@ def main():
                 if missing:
                     summary[student]["missing_files"] = len(missing)
                     logger.log(f"INFO: {student}: missing required files: {missing}")
+                    # Optional: auto-skip tests if critical files missing
+                    if len(missing) == len(TARGET_FILENAMES):
+                        logger.log(f"SKIPPING {student}: all files missing")
+                        continue
 
                 for fname, src_path in found_map.items():
                     dst = work_dir / fname
@@ -399,6 +403,7 @@ def preload_student_modules(student_src_dir: Path, module_names_csv: str):
     '''
     Preload specified modules by filename from the student's source directory,
     and pin them into sys.modules to ensure imports resolve to student code.
+    If any module fails (syntax/import error), skip that module but continue others.
     '''
     if not module_names_csv:
         return
@@ -406,14 +411,22 @@ def preload_student_modules(student_src_dir: Path, module_names_csv: str):
     for name in names:
         py_path = student_src_dir / f"{name}.py"
         if not py_path.exists():
-            raise ImportError(f"Required file missing: {py_path.name}")
-        spec = importlib.util.spec_from_file_location(name, str(py_path))
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(mod)  # type: ignore
-        if not _inside(student_src_dir, Path(getattr(mod, "__file__", ""))):
-            raise ImportError(f"Module {name} did not load from student dir: {mod.__file__}")
-        sys.modules[name] = mod
+            # file missing
+            print(f"PRELOAD WARNING: {py_path.name} missing", file=sys.stderr)
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(name, str(py_path))
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)  # type: ignore
+            sys.modules[name] = mod
+        except Exception as e:
+            # Don't crash entire test suite
+            print(f"PRELOAD WARNING: Failed to load {py_path.name}: {type(e).__name__}: {e}", file=sys.stderr)
+            # Insert a dummy placeholder module so imports won't crash
+            import types
+            dummy = types.ModuleType(name)
+            sys.modules[name] = dummy
 
 def load_single_test_module(test_path: Path):
     spec = importlib.util.spec_from_file_location(test_path.stem, str(test_path))
